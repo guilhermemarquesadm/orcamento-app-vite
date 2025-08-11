@@ -22,7 +22,6 @@ const SEED = {
       "Cartão XP": 9600, "Cartão Bradesco": 4000, "Cartão Nub": 490
     },
   },
-  incomes: { "2025-07": 22500, "2025-08": 21000 },
   transactions: [
     { id: "t1", date: "2025-07-31", month: "2025-07", category: "Energia", type: "Despesa", description: "Conta luz", amount: 508 },
     { id: "t2", date: "2025-07-31", month: "2025-07", category: "Agua", type: "Despesa", description: "Conta água", amount: 250 },
@@ -81,28 +80,31 @@ export default function App(){
   const [categories, setCategories] = useLocalStorage<string[]>("gms.categories", DEFAULT_CATEGORIES);
   const [transactions, setTransactions] = useLocalStorage<any[]>("gms.transactions", SEED.transactions);
   const [budgets, setBudgets] = useLocalStorage<Record<string, Record<string, number>>>("gms.budgets", SEED.budgets);
-  const [incomes, setIncomes] = useLocalStorage<Record<string, number>>("gms.incomes", SEED.incomes);
   const [month, setMonth] = useLocalStorage<string>("gms.month", "2025-08");
-  const [tab, setTab] = useState<"resumo"|"lancamentos"|"config">("resumo");
+  const [newMonth, setNewMonth] = useState<string>(month);
+  const [tab, setTab] = useState<"resumo"|"lancamentos"|"detalhes"|"config">("resumo");
+
+  const months = useMemo(()=>{
+    const s = new Set<string>();
+    Object.keys(budgets||{}).forEach(m=>s.add(m));
+    (transactions||[]).forEach(t=> s.add(t.month));
+    return Array.from(s).sort();
+  },[budgets, transactions]);
 
   const monthTx = useMemo(()=> transactions.filter(t => t.month===month), [transactions, month]);
+
+  const incomeSum = useMemo(()=> monthTx.filter(t=>t.type==="Receita").reduce((a,b)=>a+Number(b.amount||0),0), [monthTx]);
+  const expenseSum = useMemo(()=> monthTx.filter(t=>t.type==="Despesa").reduce((a,b)=>a+Number(b.amount||0),0), [monthTx]);
+  const saldo = incomeSum - expenseSum;
+
   const realizedByCat = useMemo(()=>{
     const m: Record<string, number> = {};
     for(const c of categories) m[c]=0;
-    for(const t of monthTx){
-      if(t.type === "Despesa"){
-        const k = t.category;
-        m[k] = (m[k]||0) + Number(t.amount||0);
-      }
-    }
+    for(const t of monthTx){ if(t.type === "Despesa") m[t.category] = (m[t.category]||0) + Number(t.amount||0); }
     return m;
   },[monthTx, categories]);
 
   const monthBudget = budgets[month] || {};
-  const totalReal = Object.values(realizedByCat).reduce((a,b)=>a+b,0);
-  const inc = incomes[month] || 0;
-  const saldo = inc - totalReal;
-
   const pieData = Object.entries(realizedByCat).filter(([_,v])=> v>0).map(([name, value])=>({ name, value }));
 
   const summaryRows = categories.map(cat => ({
@@ -110,7 +112,6 @@ export default function App(){
     budget: monthBudget?.[cat] || 0,
     realized: realizedByCat?.[cat] || 0,
     diff: (monthBudget?.[cat] || 0) - (realizedByCat?.[cat] || 0),
-    pct: (realizedByCat?.[cat] || 0) / Math.max(1,(monthBudget?.[cat] || 0))
   }));
 
   const addTransaction = (t:any) => setTransactions(prev => [...prev, { ...t, id: crypto.randomUUID() }]);
@@ -118,10 +119,9 @@ export default function App(){
   const setBudgetFor = (cat:string, value:number) => {
     setBudgets(prev => ({ ...prev, [month]: { ...(prev[month]||{}), [cat]: value } }));
   };
-  const setIncome = (value:number) => setIncomes(prev => ({ ...prev, [month]: value }));
 
   const exportData = () => {
-    const blob = new Blob([JSON.stringify({ categories, transactions, budgets, incomes }, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ categories, transactions, budgets }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = `orcamento-${month}.json`; a.click();
@@ -136,15 +136,26 @@ export default function App(){
         if(obj.categories) setCategories(obj.categories);
         if(obj.transactions) setTransactions(obj.transactions);
         if(obj.budgets) setBudgets(obj.budgets);
-        if(obj.incomes) setIncomes(obj.incomes);
       }catch(_e){ alert("Arquivo inválido"); }
     };
     reader.readAsText(file);
   };
 
+  const openNewMonth = () => {
+    if(!newMonth) return;
+    setBudgets(prev => ({ ...prev, [newMonth]: prev[newMonth] || {} }));
+    setMonth(newMonth);
+  };
+
+  const [detailType, setDetailType] = useState<"Despesa"|"Receita">("Despesa");
+  const [detailCat, setDetailCat] = useState<string>(categories[0]||"");
+  useEffect(()=>{ if(!categories.includes(detailCat) && categories.length>0) setDetailCat(categories[0]); },[categories]);
+  const detailTx = useMemo(()=> monthTx.filter(t=> t.type===detailType && t.category===detailCat), [monthTx, detailType, detailCat]);
+  const detailTotal = useMemo(()=> detailTx.reduce((a,b)=> a + Number(b.amount||0), 0), [detailTx]);
+
   return (
     <div className="container">
-      <div className="header">
+      <div className="header" style={{rowGap:8}}>
         <h1>Orçamento x Realizado</h1>
         <div className="controls">
           <input type="month" value={month} onChange={(e)=>setMonth((e.target as HTMLInputElement).value)} />
@@ -158,14 +169,26 @@ export default function App(){
         </div>
       </div>
 
+      <div className="card" style={{marginTop:8}}>
+        <div className="title">Meses</div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+          {months.map(m => (
+            <button key={m} onClick={()=>setMonth(m)} style={{padding:"6px 10px",borderRadius:999,border:"1px solid #26335b",background: m===month?"#24325f":"#17213f",color:"#eaf0ff"}}>{m}</button>
+          ))}
+          <span style={{marginLeft:8}} />
+          <input type="month" value={newMonth} onChange={(e)=>setNewMonth((e.target as HTMLInputElement).value)} />
+          <button className="primary" onClick={openNewMonth}>Abrir novo mês</button>
+        </div>
+      </div>
+
       <div className="row">
         <div className="card">
           <div className="title">Receitas</div>
-          <div className="big">{fmt(inc)}</div>
+          <div className="big">{fmt(incomeSum)}</div>
         </div>
         <div className="card">
           <div className="title">Despesas</div>
-          <div className="big">{fmt(totalReal)}</div>
+          <div className="big">{fmt(expenseSum)}</div>
         </div>
         <div className="card">
           <div className="title">Saldo</div>
@@ -176,13 +199,14 @@ export default function App(){
       <div className="tabs">
         <button className="tabbtn" aria-selected={tab==="resumo"} onClick={()=>setTab("resumo")}>Resumo</button>
         <button className="tabbtn" aria-selected={tab==="lancamentos"} onClick={()=>setTab("lancamentos")}>Lançamentos</button>
+        <button className="tabbtn" aria-selected={tab==="detalhes"} onClick={()=>setTab("detalhes")}>Detalhes</button>
         <button className="tabbtn" aria-selected={tab==="config"} onClick={()=>setTab("config")}>Configurações</button>
       </div>
 
       {tab==="resumo" && (
         <div className="space">
           <div className="card">
-            <div className="title">Orçamento x Realizado por categoria</div>
+            <div className="title">Orçamento x Realizado por categoria (Despesas)</div>
             <div style={{overflowX:"auto"}}>
               <table>
                 <thead>
@@ -191,7 +215,6 @@ export default function App(){
                     <th className="right">Orçamento</th>
                     <th className="right">Realizado</th>
                     <th className="right">Diferença</th>
-                    <th className="right">% Cumpr.</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -202,7 +225,6 @@ export default function App(){
                       else if(r.realized<=r.budget*1.1) status = "warn";
                       else status = "over";
                     }
-                    const pct = r.budget===0 ? "—" : `${Math.round((r.realized/Math.max(1,r.budget))*100)}%`;
                     return (
                       <tr key={r.category}>
                         <td>
@@ -212,7 +234,6 @@ export default function App(){
                         <td className="right">{fmt(r.budget)}</td>
                         <td className="right">{fmt(r.realized)}</td>
                         <td className="right">{fmt(r.diff)}</td>
-                        <td className="right">{pct}</td>
                       </tr>
                     );
                   })}
@@ -283,7 +304,7 @@ export default function App(){
                       <td>{t.type}</td>
                       <td>{t.category}</td>
                       <td>{t.description}</td>
-                      <td className="right">{fmt(t.amount)}</td>
+                      <td className="right">{t.type==="Receita"? "+" : "-"}{fmt(t.amount)}</td>
                       <td className="right">
                         <button onClick={()=>removeTransaction(t.id)}>Excluir</button>
                       </td>
@@ -296,17 +317,54 @@ export default function App(){
         </div>
       )}
 
-      {tab==="config" && (
+      {tab==="detalhes" && (
         <div className="space">
           <div className="card">
-            <div className="title">Receita do mês</div>
-            <div className="controls">
-              <input type="number" step="0.01" value={incomes[month] || 0}
-                onChange={(e)=>setIncome(Number((e.target as HTMLInputElement).value))} />
-              <span>{month}</span>
+            <div className="title">Detalhes analíticos</div>
+            <div className="controls" style={{flexWrap:"wrap"}}>
+              <select value={detailType} onChange={(e)=> setDetailType((e.target as HTMLSelectElement).value as any)}>
+                <option value="Despesa">Despesa</option>
+                <option value="Receita">Receita</option>
+              </select>
+              <select value={detailCat} onChange={(e)=> setDetailCat((e.target as HTMLSelectElement).value)}>
+                {categories.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
             </div>
           </div>
+          <div className="card">
+            <div className="title">{detailType} — {detailCat} ({month})</div>
+            <div style={{overflowX:"auto"}}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Data</th>
+                    <th>Descrição</th>
+                    <th className="right">Valor</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detailTx.map(t => (
+                    <tr key={t.id}>
+                      <td>{t.date}</td>
+                      <td>{t.description}</td>
+                      <td className="right">{detailType==="Receita"? "+":"-"}{fmt(t.amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td colSpan={2}><b>Total</b></td>
+                    <td className="right"><b>{detailType==="Receita"? "+":"-"}{fmt(detailTotal)}</b></td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
+      {tab==="config" && (
+        <div className="space">
           <div className="card">
             <div className="title">Orçamentos por categoria ({month})</div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 120px",gap:"8px 12px"}}>
@@ -347,7 +405,7 @@ function AddTransactionForm({ month, categories, onAdd }:{ month:string, categor
 
   const submit = () => {
     if(!amount || !category){ return; }
-    onAdd({ date, month, type, category, description, amount: Number(amount) });
+    onAdd({ date, month, type, category, description, amount: Math.abs(Number(amount)) });
     setDescription(""); setAmount(0);
   };
 
